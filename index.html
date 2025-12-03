@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>قهرمانان ضرب - آنلاین</title>
+    <!-- Tailwind CSS CDN for beautiful design -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons (برای آیکون‌ها) -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Custom styles for animations */
+        @keyframes scale-in {
+            from { transform: scale(0.8); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+        @keyframes fade-in {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        .animate-scale-in { animation: scale-in 0.5s ease-out; }
+        .animate-fade-in { animation: fade-in 0.3s ease-in; }
+        /* Font style */
+        body { 
+            font-family: 'Inter', Tahoma, sans-serif; /* استفاده از فونت عمومی‌تر برای سازگاری */
+            direction: rtl; 
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-indigo-100 to-purple-200 min-h-screen">
+    <div id="app" class="p-4 flex items-center justify-center min-h-screen">
+        <!-- Content will be rendered here by JavaScript -->
+        <div class="text-center text-gray-700 p-8">
+            <h1 class="text-2xl font-bold">در حال بارگذاری...</h1>
+            <p>لطفاً صبر کنید.</p>
+        </div>
+    </div>
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, limit, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- Global Variables (Mandatory for Canvas Environment) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // --- Firestore Setup ---
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+        
+        const COLLECTION_PATH = `artifacts/${appId}/public/data/multiplication_scores`;
+        
+        // Game state variables (defined in the main script scope below)
+        window.playerName = "";
+        window.currentView = "login";
+        window.difficulty = "easy";
+        window.questions = [];
+        window.currentQIndex = 0;
+        window.score = 0;
+        window.startTime = null;
+        window.endTime = null;
+        window.isTeacher = false;
+        window.leaderboardData = [];
+        window.feedbackTimer = null;
+        
+        // Global utility functions exposed to the window
+        window.setView = setView;
+        window.handleLogin = handleLogin;
+        window.handleTeacherLogin = handleTeacherLogin;
+        window.startGame = startGame;
+        window.submitAnswer = submitAnswer;
+
+        // --- Firebase Initialization and Authentication ---
+        const initFirebase = async () => {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase config is missing. Using localStorage fallback.");
+                // Fallback: If config is missing, rely on the existing global state logic to proceed without online features.
+                window.onload(); // Start rendering immediately with local storage (if implemented in main script)
+                return;
+            }
+
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Sign in with custom token or anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("Authentication successful. User ID:", userId);
+                        // Start real-time listener after successful auth
+                        listenForScores();
+                        window.onload(); // Start the game rendering
+                    } else {
+                        isAuthReady = true;
+                        console.log("Signed out or anonymous. Game functional, but data may not load/save if rules require auth.");
+                        window.onload(); // Start the game rendering even if sign-in fails
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase or signing in:", error);
+                isAuthReady = true;
+                window.onload(); // Proceed with rendering even on error
+            }
+        };
+
+        // --- Firestore Real-time Listener for Leaderboard ---
+        const listenForScores = () => {
+            if (!isAuthReady || !db) return;
+            
+            // Query: Get top 100 scores, ordered by score (desc) and time (asc)
+            const scoresQuery = query(
+                collection(db, COLLECTION_PATH),
+                orderBy("score", "desc"), 
+                orderBy("timeTaken", "asc"),
+                limit(100)
+            );
+
+            onSnapshot(scoresQuery, (snapshot) => {
+                const scores = snapshot.docs.map(doc => doc.data());
+                window.leaderboardData = scores; // Update global state
+                if (window.currentView === 'menu' || window.currentView === 'leaderboard' || window.currentView === 'teacher') {
+                    window.render(); // Re-render if viewing score screens
+                }
+                console.log("Leaderboard updated:", scores.length, "entries");
+            }, (error) => {
+                console.error("Error listening to scores:", error);
+                alert("مشکل در دریافت جدول امتیازات. اتصال خود را بررسی کنید.");
+            });
+        };
+
+        // --- Firestore Save Function ---
+        window.saveOnlineScore = async (newScore) => {
+            if (!isAuthReady || !db || !userId) {
+                console.error("Cannot save: Auth not ready or DB not initialized.");
+                return;
+            }
+            try {
+                await addDoc(collection(db, COLLECTION_PATH), {
+                    ...newScore,
+                    userId: userId, // Add user ID for identification
+                    timestamp: Date.now()
+                });
+                console.log("Score saved successfully!");
+            } catch (e) {
+                console.error("Error saving score:", e);
+                alert("مشکل در ذخیره امتیاز! اتصال اینترنت را چک کنید.");
+            }
+        };
+        
+        // Start initialization process
+        initFirebase();
+    </script>
+
+    <!-- Main Game Script (Uses window scope for communication) -->
+    <script>
+        const TEACHER_PASSWORD = "123";
+        const TOTAL_QUESTIONS = 10;
+        
+        // --- Helper Functions ---
+        const generateQuestion = (level) => {
+            const num1 = Math.floor(Math.random() * 9) + 1;
+            let num2;
+            
+            if (level === 'easy') {
+                num2 = Math.floor(Math.random() * 9) + 1;
+            } else if (level === 'medium') {
+                num2 = Math.floor(Math.random() * 90) + 10;
+            } else {
+                num2 = Math.floor(Math.random() * 900) + 100;
+            }
+            return Math.random() > 0.5 
+                ? { n1: num1, n2: num2, ans: num1 * num2 }
+                : { n1: num2, n2: num1, ans: num1 * num2 };
+        };
+
+        const formatTime = (seconds) => {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.round(seconds % 60);
+            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        };
+
+        // --- State Management and Rendering ---
+        function setView(viewName) {
+            window.currentView = viewName;
+            render();
+        };
+
+        function handleLogin() {
+            const input = document.getElementById('playerNameInput');
+            if (input.value.trim().length > 0) {
+                window.playerName = input.value.trim();
+                setView("menu");
+            }
+        };
+
+        function handleTeacherLogin() {
+            const input = document.getElementById('teacherPassInput');
+            if (input.value === TEACHER_PASSWORD) {
+                window.isTeacher = true;
+                setView("teacher");
+            } else {
+                // Custom alert replacement for an iframe
+                showCustomMessage("خطا", "رمز عبور اشتباه است!", "error");
+            }
+        };
+        
+        const showCustomMessage = (title, message, type) => {
+            const appEl = document.getElementById('app');
+            const overlay = document.createElement('div');
+            overlay.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+            
+            const icon = type === 'error' ? lucide.createIcons()['alert-triangle'].toSvg({ class: "text-red-500 w-12 h-12" }) : lucide.createIcons()['info'].toSvg({ class: "text-blue-500 w-12 h-12" });
+
+            overlay.innerHTML = `
+                <div class="bg-white p-8 rounded-xl shadow-2xl max-w-sm text-center transform scale-100 animate-scale-in">
+                    ${icon}
+                    <h3 class="text-xl font-bold mt-4">${title}</h3>
+                    <p class="text-gray-600 mt-2">${message}</p>
+                    <button onclick="document.querySelector('.fixed.inset-0').remove()" 
+                            class="mt-6 bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700">باشه</button>
+                </div>
+            `;
+            appEl.appendChild(overlay);
+        };
+
+
+        function startGame(level) {
+            window.difficulty = level;
+            window.questions = Array.from({ length: TOTAL_QUESTIONS }, () => generateQuestion(level));
+            window.currentQIndex = 0;
+            window.score = 0;
+            window.startTime = Date.now();
+            setView("game");
+        };
+        
+        const showFeedback = (type) => {
+            const feedbackEl = document.getElementById('feedbackOverlay');
+            if (!feedbackEl) return;
+            
+            let icon, text, bgColor, textColor;
+
+            if (type === 'correct') {
+                icon = lucide.createIcons()['check-circle'].toSvg();
+                text = 'آفرین! 👏';
+                bgColor = 'bg-green-100';
+                textColor = 'text-green-500';
+                window.score += 10;
+            } else {
+                const currentQ = window.questions[window.currentQIndex];
+                icon = lucide.createIcons()['x-circle'].toSvg();
+                text = 'اشتباه بود 😢';
+                bgColor = 'bg-red-100';
+                textColor = 'text-red-500';
+                text += `<p class="text-xl mt-2 text-gray-600">جواب درست: ${currentQ.ans}</p>`;
+            }
+
+            feedbackEl.className = `absolute inset-0 flex items-center justify-center z-10 bg-opacity-90 ${bgColor} animate-fade-in`;
+            feedbackEl.innerHTML = `
+                <div class="transform animate-bounce ${textColor} flex flex-col items-center">
+                    ${icon.replace(/width="24"/g, 'width="100"').replace(/height="24"/g, 'height="100"')}
+                    <h2 class="text-4xl font-bold mt-4">${text}</h2>
+                </div>
+            `;
+            
+            feedbackEl.style.display = 'flex';
+            
+            clearTimeout(window.feedbackTimer);
+            window.feedbackTimer = setTimeout(() => {
+                feedbackEl.style.display = 'none';
+                handleNextQuestion();
+            }, 1000);
+        };
+
+        const handleNextQuestion = () => {
+            if (window.currentQIndex < TOTAL_QUESTIONS - 1) {
+                window.currentQIndex++;
+                render(); 
+                document.getElementById('userAnswerInput').value = '';
+                document.getElementById('userAnswerInput').focus();
+            } else {
+                endGame(window.score);
+            }
+        }
+
+
+        function submitAnswer() {
+            const input = document.getElementById('userAnswerInput');
+            const userAnswer = parseInt(input.value);
+            if (isNaN(userAnswer)) return; 
+
+            const currentQ = window.questions[window.currentQIndex];
+            const isCorrect = userAnswer === currentQ.ans;
+
+            if (isCorrect) {
+                showFeedback('correct');
+            } else {
+                showFeedback('wrong');
+            }
+        };
+
+        const endGame = (finalScore) => {
+            window.endTime = (Date.now() - window.startTime) / 1000;
+            window.score = finalScore;
+            
+            const newEntry = {
+                playerName: window.playerName,
+                score: finalScore,
+                totalQuestions: TOTAL_QUESTIONS,
+                difficulty: window.difficulty,
+                timeTaken: window.endTime,
+            };
+            
+            if (typeof window.saveOnlineScore === 'function') {
+                window.saveOnlineScore(newEntry);
+            } else {
+                 showCustomMessage("توجه", "امتیاز فقط به صورت محلی ثبت شد. برای جدول آنلاین، اپلیکیشن را روی سرور (مثلاً GitHub Pages) اجرا کنید.", "info");
+            }
+
+            setView("result");
+        };
+
+        // --- Rendering Functions (Simplified HTML Templates) ---
+        // (Use window. for global variables)
+
+        const renderLogin = () => `
+            <div class="bg-white rounded-3xl p-8 shadow-2xl w-full max-w-md text-center border-4 border-yellow-400 transform transition-transform duration-300">
+                <h1 class="text-4xl font-bold text-purple-600 mb-6 drop-shadow-md">قهرمانان ضرب ✖️</h1>
+                <p class="text-xs text-blue-500 mb-4 font-bold">جدول امتیازات شما آنلاین و مشترک خواهد بود!</p>
+                <div class="mb-6">
+                    <label class="block text-gray-700 text-lg font-bold mb-2">اسم قشنگت چیه؟</label>
+                    <input type="text" id="playerNameInput" value="${window.playerName}"
+                        class="w-full px-4 py-3 rounded-xl border-2 border-purple-300 focus:border-purple-500 focus:outline-none text-xl text-center"
+                        placeholder="اینجا بنویس..."
+                        onkeydown="if(event.key === 'Enter') handleLogin()"
+                    />
+                </div>
+                <button onclick="handleLogin()"
+                    class="w-full bg-yellow-400 hover:bg-yellow-500 text-purple-900 font-bold py-3 px-6 rounded-xl text-xl shadow-lg transform active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed mb-4 flex items-center justify-center gap-2">
+                    ${lucide.createIcons()['play'].toSvg({ width: 24, height: 24 })}
+                    ورود به بازی
+                </button>
+                
+                <div class="border-t-2 border-gray-100 pt-4 mt-4">
+                    <p class="text-sm text-gray-500 mb-2">مخصوص معلم:</p>
+                    <div class="flex gap-2">
+                        <input type="password" id="teacherPassInput" placeholder="رمز عبور"
+                            class="flex-1 px-3 py-2 rounded-lg border border-gray-300 text-sm"
+                            onkeydown="if(event.key === 'Enter') handleTeacherLogin()"
+                        />
+                        <button onclick="handleTeacherLogin()"
+                            class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-bold">
+                            ورود معلم
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const renderMenu = () => {
+            const hasScores = window.leaderboardData.length > 0;
+            return `
+            <div class="w-full max-w-4xl">
+                <div class="flex justify-between items-center mb-8 bg-white p-4 rounded-2xl shadow-md">
+                    <h2 class="text-2xl font-bold text-purple-700 flex items-center gap-2">
+                        ${lucide.createIcons()['user'].toSvg({ class: "text-yellow-500" })}
+                        سلام ${window.playerName}! 👋
+                    </h2>
+                    <button onclick="setView('login')" class="text-red-500 hover:bg-red-50 p-2 rounded-full">
+                        ${lucide.createIcons()['log-out'].toSvg()}
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="bg-white p-6 rounded-3xl shadow-xl border-b-8 border-purple-200">
+                        <h3 class="text-2xl font-bold text-gray-800 mb-6 text-center">انتخاب مرحله 🎮</h3>
+                        
+                        <button onclick="startGame('easy')" class="w-full mb-4 bg-green-400 hover:bg-green-500 text-white p-4 rounded-xl font-bold text-xl shadow-md flex items-center justify-between group transition-all">
+                            <span>سطح ۱: ضرب‌های ساده (۱ در ۱ رقمی)</span>
+                            <span class="text-3xl group-hover:scale-125 transition-transform">🐣</span>
+                        </button>
+
+                        <button onclick="startGame('medium')" class="w-full mb-4 bg-blue-400 hover:bg-blue-500 text-white p-4 rounded-xl font-bold text-xl shadow-md flex items-center justify-between group transition-all">
+                            <span>سطح ۲: کمی سخت‌تر (۱ در ۲ رقمی)</span>
+                            <span class="text-3xl group-hover:scale-125 transition-transform">🦊</span>
+                        </button>
+
+                        <button onclick="startGame('hard')" class="w-full bg-red-400 hover:bg-red-500 text-white p-4 rounded-xl font-bold text-xl shadow-md flex items-center justify-between group transition-all">
+                            <span>سطح ۳: قهرمان (۱ در ۳ رقمی)</span>
+                            <span class="text-3xl group-hover:scale-125 transition-transform">🦁</span>
+                        </button>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-3xl shadow-xl border-b-8 border-yellow-200 overflow-hidden">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                                ${lucide.createIcons()['trophy'].toSvg({ class: "text-yellow-500" })}
+                                برترین‌ها (آنلاین)
+                            </h3>
+                            ${hasScores ? `<button onclick="setView('leaderboard')" class="text-blue-500 text-sm font-bold hover:underline">مشاهده همه</button>` : ''}
+                        </div>
+                        
+                        <div class="space-y-3">
+                            ${window.leaderboardData.slice(0, 5).map((entry, idx) => `
+                                <div class="flex items-center justify-between bg-gray-50 p-3 rounded-lg">
+                                    <div class="flex items-center gap-3">
+                                        <span class="flex items-center justify-center w-8 h-8 rounded-full font-bold text-white ${idx === 0 ? 'bg-yellow-400' : idx === 1 ? 'bg-gray-400' : idx === 2 ? 'bg-orange-400' : 'bg-blue-300'}">
+                                            ${idx + 1}
+                                        </span>
+                                        <span class="font-bold text-gray-700">${entry.playerName}</span>
+                                    </div>
+                                    <div class="flex items-center gap-4">
+                                        <span class="text-green-600 font-bold">${entry.score} امتیاز</span>
+                                        <span class="text-xs text-gray-400 bg-gray-200 px-2 py-1 rounded-full">${entry.difficulty === 'easy' ? 'ساده' : entry.difficulty === 'medium' ? 'متوسط' : 'سخت'}</span>
+                                    </div>
+                                </div>
+                            `).join('')}
+                            ${!hasScores ? '<p class="text-center text-gray-400 py-4">هنوز رکوردی ثبت نشده. اولین نفر باش!</p>' : ''}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            `;
+        };
+        
+        const renderGame = () => {
+            const currentQ = window.questions[window.currentQIndex];
+            const progress = ((window.currentQIndex) / TOTAL_QUESTIONS) * 100;
+
+            return `
+            <div class="min-h-screen bg-indigo-500 flex flex-col items-center justify-center p-4 w-full">
+                <!-- Progress Bar -->
+                <div class="w-full max-w-2xl bg-indigo-800 rounded-full h-4 mb-8">
+                    <div class="bg-yellow-400 h-4 rounded-full transition-all duration-500" style="width: ${progress}%;"></div>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-2xl p-8 w-full max-w-2xl text-center relative overflow-hidden">
+                    <div id="feedbackOverlay" style="display: none;"></div>
+
+                    <div class="flex justify-between text-gray-500 font-bold mb-8">
+                        <span>سوال ${window.currentQIndex + 1} از ${TOTAL_QUESTIONS}</span>
+                        <span class="flex items-center gap-1 text-yellow-500">${lucide.createIcons()['star'].toSvg({ fill: "currentColor" })} ${window.score}</span>
+                    </div>
+
+                    <div class="mb-12">
+                        <div class="flex items-center justify-center gap-4 text-6xl md:text-8xl font-black text-gray-800 font-mono tracking-wider">
+                            <span>${currentQ.n1}</span>
+                            <span class="text-purple-500">×</span>
+                            <span>${currentQ.n2}</span>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col gap-4 max-w-sm mx-auto">
+                        <input type="number" id="userAnswerInput"
+                            class="w-full bg-gray-100 border-4 border-gray-300 focus:border-purple-500 rounded-2xl py-4 text-center text-4xl font-bold outline-none transition-colors"
+                            placeholder="؟" autofocus
+                            onkeydown="if(event.key === 'Enter') submitAnswer()"
+                        />
+                        <button onclick="submitAnswer()"
+                            class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-4 rounded-2xl text-xl shadow-lg transform active:translate-y-1 transition-all">
+                            ثبت جواب
+                        </button>
+                    </div>
+                </div>
+            </div>
+            `;
+        };
+
+        const renderResult = () => `
+            <div class="min-h-screen bg-green-400 flex items-center justify-center p-4 w-full">
+                <div class="bg-white rounded-3xl shadow-2xl p-8 w-full max-w-lg text-center animate-scale-in">
+                    ${lucide.createIcons()['award'].toSvg({ width: 80, height: 80, class: "mx-auto text-yellow-500 mb-4" })}
+                    <h2 class="text-3xl font-bold text-gray-800 mb-2">پایان بازی!</h2>
+                    <p class="text-gray-500 mb-8">خسته نباشی ${window.playerName} قهرمان</p>
+
+                    <div class="grid grid-cols-2 gap-4 mb-8">
+                        <div class="bg-purple-50 p-4 rounded-2xl">
+                            <p class="text-sm text-gray-500">امتیاز نهایی</p>
+                            <p class="text-3xl font-bold text-purple-600">${window.score}</p>
+                        </div>
+                        <div class="bg-blue-50 p-4 rounded-2xl">
+                            <p class="text-sm text-gray-500">زمان</p>
+                            <p class="text-3xl font-bold text-blue-600">${window.endTime ? formatTime(window.endTime) : "00:00"}</p>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col gap-3">
+                        <button onclick="setView('menu')" class="w-full bg-yellow-400 hover:bg-yellow-500 text-purple-900 font-bold py-3 rounded-xl shadow-md">
+                            بازگشت به منو
+                        </button>
+                        <button onclick="setView('leaderboard')" class="w-full bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-3 rounded-xl">
+                            دیدن جدول رتبه‌بندی
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const renderLeaderboard = () => {
+            const userId = window.auth?.currentUser?.uid;
+            return `
+            <div class="max-w-4xl mx-auto w-full">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-3xl font-bold text-orange-600 flex items-center gap-2">
+                        ${lucide.createIcons()['trophy'].toSvg()} جدول قهرمانان (آنلاین)
+                    </h2>
+                    <button onclick="setView('menu')" class="bg-white px-4 py-2 rounded-lg font-bold shadow text-gray-600 hover:bg-gray-50">بازگشت</button>
+                </div>
+                <p class="text-center text-sm text-blue-500 mb-4 font-bold">این جدول نتایج ذخیره شده توسط همه کاربران است.</p>
+
+                <div class="bg-white rounded-3xl shadow-xl overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-right text-sm">
+                            <thead class="bg-orange-100 text-orange-800">
+                                <tr>
+                                    <th class="p-4">رتبه</th>
+                                    <th class="p-4">نام قهرمان</th>
+                                    <th class="p-4">امتیاز</th>
+                                    <th class="p-4">زمان</th>
+                                    <th class="p-4 hidden md:table-cell">سطح</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${window.leaderboardData.map((entry, idx) => `
+                                    <tr class="border-b hover:bg-orange-50 transition-colors ${entry.userId === userId ? 'bg-yellow-50 font-extrabold' : ''}">
+                                        <td class="p-4 font-bold text-gray-500">
+                                            ${idx < 3 ? `<span class="text-2xl">${idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉'}</span>` : idx + 1}
+                                        </td>
+                                        <td class="p-4 font-bold text-gray-800">${entry.playerName} ${entry.userId === userId ? '(شما)' : ''}</td>
+                                        <td class="p-4 text-green-600 font-bold">${entry.score}</td>
+                                        <td class="p-4 text-blue-500">${formatTime(entry.timeTaken)}</td>
+                                        <td class="p-4 hidden md:table-cell">
+                                            <span class="px-2 py-1 rounded text-xs text-white ${entry.difficulty === 'easy' ? 'bg-green-400' : entry.difficulty === 'medium' ? 'bg-blue-400' : 'bg-red-400'}">
+                                               ${entry.difficulty === 'easy' ? 'ساده' : entry.difficulty === 'medium' ? 'متوسط' : 'سخت'}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    ${window.leaderboardData.length === 0 ? '<p class="text-center text-gray-400 py-8">جدول امتیازات خالی است.</p>' : ''}
+                </div>
+            </div>
+        `;
+
+        const renderTeacherDashboard = () => `
+            <div class="max-w-6xl mx-auto w-full">
+                <div class="flex justify-between items-center mb-8">
+                    <h2 class="text-3xl font-bold text-gray-800 flex items-center gap-2">
+                        ${lucide.createIcons()['shield-check'].toSvg({ class: "text-blue-600" })}
+                        پنل مدیریت معلم (آنلاین)
+                    </h2>
+                    <button onclick="window.isTeacher = false; setView('login');" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">خروج</button>
+                </div>
+                <p class="text-center text-sm text-blue-500 mb-4 font-bold">اینجا تمام نتایج آنلاین ذخیره شده توسط دانش‌آموزان را مشاهده می‌کنید.</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div class="bg-white p-6 rounded-xl shadow border-r-4 border-blue-500">
+                        <p class="text-gray-500">تعداد کل بازی‌ها</p>
+                        <p class="text-3xl font-bold">${window.leaderboardData.length}</p>
+                    </div>
+                    <div class="bg-white p-6 rounded-xl shadow border-r-4 border-green-500">
+                        <p class="text-gray-500">بالاترین امتیاز</p>
+                        <p class="text-3xl font-bold">${Math.max(...window.leaderboardData.map(d => d.score), 0)}</p>
+                    </div>
+                    <div class="bg-white p-6 rounded-xl shadow border-r-4 border-purple-500">
+                        <p class="text-gray-500">تعداد دانش‌آموزان</p>
+                        <p class="text-3xl font-bold">${new Set(window.leaderboardData.map(d => d.playerName)).size}</p>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow overflow-hidden">
+                    <div class="p-4 border-b bg-gray-50 font-bold text-gray-700">ریز نمرات همه دانش‌آموزان</div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-right text-sm">
+                            <thead class="bg-gray-100 text-gray-600">
+                                <tr>
+                                    <th class="p-3">تاریخ</th>
+                                    <th class="p-3">نام دانش‌آموز</th>
+                                    <th class="p-3">سطح دشواری</th>
+                                    <th class="p-3">امتیاز</th>
+                                    <th class="p-3">زمان</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${window.leaderboardData.map((entry, idx) => `
+                                    <tr class="border-b hover:bg-gray-50">
+                                        <td class="p-3 text-gray-500">${new Date(entry.timestamp).toLocaleDateString('fa-IR')}</td>
+                                        <td class="p-3 font-bold">${entry.playerName}</td>
+                                        <td class="p-3">
+                                            ${entry.difficulty === 'easy' ? 'ساده' : 
+                                            entry.difficulty === 'medium' ? 'متوسط' : 'سخت'}
+                                        </td>
+                                        <td class="p-3 font-bold text-green-600">${entry.score}</td>
+                                        <td class="p-3 font-mono">${formatTime(entry.timeTaken)}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    ${window.leaderboardData.length === 0 ? '<p class="text-center text-gray-400 py-8">هیچ داده‌ای وجود ندارد.</p>' : ''}
+                </div>
+            </div>
+        `;
+
+        function render() {
+            const appEl = document.getElementById('app');
+            let content = '';
+
+            // Render based on current view
+            if (window.currentView === 'login') content = renderLogin();
+            else if (window.currentView === 'menu') content = renderMenu();
+            else if (window.currentView === 'game') content = renderGame();
+            else if (window.currentView === 'result') content = renderResult();
+            else if (window.currentView === 'leaderboard') content = renderLeaderboard();
+            else if (window.currentView === 'teacher') content = renderTeacherDashboard();
+
+            // Set content and adjust body class
+            appEl.innerHTML = content;
+            if (window.currentView === 'login' || window.currentView === 'game' || window.currentView === 'result') {
+                 document.body.className = 'bg-gradient-to-br from-blue-400 to-purple-500 min-h-screen';
+                 appEl.className = 'p-4 flex items-center justify-center min-h-screen w-full';
+            } else {
+                 document.body.className = 'bg-gray-100 min-h-screen';
+                 appEl.className = 'p-4 flex items-start justify-center min-h-screen w-full';
+            }
+            
+            // Re-render Lucide icons after setting innerHTML
+            lucide.createIcons();
+            
+            // Focus on the input in the game view
+            if (window.currentView === 'game') {
+                 document.getElementById('userAnswerInput')?.focus();
+            }
+        };
+        
+        // Initial call is handled by the `initFirebase` in the <script type="module"> block
+        // We expose render globally so initFirebase can call it.
+        window.render = render;
+        window.onload = () => {
+             // Fallback for browsers without module support or where initFirebase is skipped
+             if (!window.isAuthReady) {
+                 render();
+             }
+        };
+
+    </script>
+</body>
+</html>
+
