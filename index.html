@@ -44,7 +44,14 @@
         
         // --- Global Variables (Mandatory for Canvas Environment) ---
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const firebaseConfig = {apiKey: "AIzaSyC-vio_OFvYlyxjhYl9fOyYqW9i-XaY-_8",
+  authDomain: "ghareman-dc559.firebaseapp.com",
+  projectId: "ghareman-dc559",
+  storageBucket: "ghareman-dc559.firebasestorage.app",
+  messagingSenderId: "835783095228",
+  appId: "1:835783095228:web:60c22d6b3ab026a6abb1b9",
+  measurementId: "G-5HTJNNCGMY"
+};);
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
         // --- Firestore Setup ---
